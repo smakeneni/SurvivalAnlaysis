@@ -1,0 +1,930 @@
+---
+title: "Survival Analysis on Non-small cell lung cancer"
+author: "Spandana Makeneni"
+output: 
+  html_document:
+  #github_document:
+    toc: true 
+    toc_depth: 3
+    df_print: kable
+    toc_float: 
+        collapsed: TRUE
+        smooth_scroll: FALSE
+    number_sections: FALSE
+    messages: FALSE
+fontsize: 11pt
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,warning=FALSE,message=FALSE)
+```
+<style>
+body {
+text-align: justify}
+</style>
+
+<style>
+div.blue { background-color:#e6f0ff; border: 1px solid black; padding: 5px;}
+</style>
+
+<style>
+div.black { background-color:#8FBC8F; border: 1px solid black; padding: 5px;}
+</style>
+
+#Goal and Impact
+<div class = "blue">
+The goal of this project is to estimate survival rates for lung squamous cell carcinoma(LUSC) and lung adenocarcinoma(LUAD) cancers using data from the  cancer genome atlas program (TCGA). Specifically, we will investigate the impact of demographic and pathological features on survival rate. Estimating the survival rate and unraveling the features that affect it will provide clinicians with a better baseline from which to tailor therapies or estimate how likely a treatment will be successful. 
+</div>
+
+# Background 
+Lung cancer is the second most common form of cancer in both men and women, accounting for 2.3 million cases of the 17 million total estimated cases. It is also the leading cause of death making up almost 25% of all cancer deaths. There are two types of lung cancers: small cell and non-small cell cancers. Non-small cell cancers account for 85-90% of all lung cancers. Lung squamous cell carcinoma (LUSC) and Lung adenocarcinoma (LUAD), the two subtypes account for 25-30% and 40% of cases respectively. LUSC is associated with smoking and is usually found in the middle of the lungs. LUAD on the other hand is found on the periphery of the lungs and may be associated with smoking in some cases but is the most common cancer type among non-smokers. Most people diagnosed with lung cancer are 65 or older whereas a very small number of people diagnosed are younger than 45.
+
+# Specific Questions 
+<div class = "blue">
+
+1) Are patient survival rates different for LUSC and LUAD? 
+
+2) Are patient survival rates different for sub-groups within the dataset? for example, male vs. female ?
+
+3) How do individual demographic factors effect survival?  Will smoking history affect survival rates sepecifically in LUAD cancer patients? 
+
+Ok, now that we have framed our questions, lets proceed!  
+</div>
+
+# Data Extraction 
+* The dataset was obtained from The Cancer Genome Atlas program ([TCGA](https://www.cancer.gov/about-nci/organization/ccg/research/structural-genomics/tcga))  
+* **RTCGA and RTCGA.clinical** packages were used to extract data  
+* LUSC and LUAD clinical data sets contain 504 and 522 patient records respectively.  
+* For each patient, I extracted the following information:
+  + Gender  
+  + Age = Age of the patient at initial diagnosis  
+  + Ethnicity  
+  + Race  
+  + Pathologic stage  
+  + Pathologic substages (t,n,m)  
+  + Smoking history  
+  + vital status (Event(in this case death) or censored)  
+  + times = either the time to death (time in days from the time of initial diagnosis to time of death) or time to last follow up(time interval between initial diagnosis and last followup) whichever is applicable for each patient   
+
+``` {r laoding libraries,echo=FALSE, warning=FALSE, message=FALSE}
+#Loading all libraries required for data analysis
+#RTCGA and RTCGA.clinical for extracting data
+#survminer and survival for survival analysis
+#All other libraries are to aid data wrangling, visualizations etc
+
+library(RTCGA)
+library(RTCGA.clinical)
+library(survival)
+library(survminer)
+library(gridExtra)
+library(kableExtra)
+library(tigerstats)
+library(tidyverse)
+library(broom)
+```
+
+    
+```{r dataextraction}  
+  LUSC <- survivalTCGA(LUSC.clinical,extract.cols = c("patient.gender","patient.ethnicity","patient.race","patient.age_at_initial_pathologic_diagnosis",
+               "patient.stage_event.pathologic_stage", "patient.stage_event.tnm_categories.pathologic_categories.pathologic_m",
+               "patient.stage_event.tnm_categories.pathologic_categories.pathologic_n","patient.stage_event.tnm_categories.pathologic_categories.pathologic_t",
+               "patient.tobacco_smoking_history"))
+
+  LUAD <- survivalTCGA(LUAD.clinical,extract.cols= c("patient.gender","patient.ethnicity","patient.race","patient.age_at_initial_pathologic_diagnosis",
+                "patient.stage_event.pathologic_stage", "patient.stage_event.tnm_categories.pathologic_categories.pathologic_m",
+                "patient.stage_event.tnm_categories.pathologic_categories.pathologic_n","patient.stage_event.tnm_categories.pathologic_categories.pathologic_t",
+                "patient.tobacco_smoking_history"))
+
+# A seperate dataframe which consists of 4 columns: times,patient_code,vital_status, and disease code 
+LUSC_LUAD <-survivalTCGA(LUSC.clinical,LUAD.clinical,extract.cols= c("admin.disease_code"))
+
+```
+
+#Data Wrangling
+## Step1 - Eliminate negative values from the times column 
+
+* Negative values indicate error in data collection 
+* Filter (times >= 0) and then convert the time from days to years (times/365).
+
+```{r data wrangling step1}
+LUSC_modified <- LUSC %>% filter(times > 0) %>% mutate(times=times/365)
+LUAD_modified <- LUAD %>% filter(times > 0) %>% mutate(times=times/365)
+LUSC_LUAD_modified <- LUSC_LUAD %>% filter(times > 0) %>% mutate(times=times/365)
+```  
+
+Number of records before and after eliminating negative times.  
+
+|   |Before|After|
+|---|---|---|
+| LUSC | `r nrow(LUSC)` | `r nrow(LUSC_modified)` |
+| LUAD | `r nrow(LUAD)` | `r nrow(LUAD_modified)` |
+    
+```{r modify column names}
+#modify column names
+#The column names are too long. So, I will modify them for ease of usage 
+
+colnames(LUSC_modified) <- c("time_to_event","ID","vital_status","gender","ethnicity","race","age","pathologic_stage","stage_m","stage_n","stage_t","smoking_history")
+colnames(LUAD_modified) <- c("time_to_event","ID","vital_status","gender","ethnicity","race","age","pathologic_stage","stage_m","stage_n","stage_t","smoking_history")
+```
+
+## Step2 - Check for missing data
+``` {r Check for missing data}
+LUSC_missing <- LUSC_modified %>% sapply(function(x) round((sum(is.na(x))/nrow(LUSC_modified))*100,digits=2))
+LUSC_missing <- as.data.frame(LUSC_missing)
+LUSC_missing <- cbind(variable=rownames(LUSC_missing),data.frame(LUSC_missing,row.names=NULL))
+
+LUAD_missing <- LUAD_modified %>% sapply(function(x) round((sum(is.na(x))/nrow(LUAD_modified))*100,digits=2))
+LUAD_missing <- as.data.frame(LUAD_missing)
+LUSC_LUAD_missing <- cbind(LUSC_missing,LUAD_missing,row.names=NULL)
+gather(LUSC_LUAD_missing,type,prop,LUSC_missing:LUAD_missing) %>% filter(prop>0.00) %>% ggplot( aes(x=variable,y=prop,fill=type))+geom_bar(stat="identity",position="dodge")+coord_flip()+theme_classic()+xlab("")+ylab("% missing")+
+  scale_fill_discrete(name="Cancer",labels=c("LUSC","LUAD"))+ggtitle("Missing values in LUSC and LUAD")
+```
+<div class = "black">
+* 6 of the 9 variables have missing data   
+* 4 variables (stage_n, stage_m, pathologic_stage, smoking_history) have < 3% missing values   
+* For race and ethinicity variables, LUSC has 10% and 20% missing values while LUAD has 20% and 34% missing values respectively 
+</div>
+  
+&nbsp;     
+**Let's explore the RACE and ETHNICITY variables** 
+&nbsp;  
+
+**Ethnicity**
+
+```{r explore ethnicity}
+
+ethnicity_LUSC_plot <- LUSC_modified %>% arrange(ethnicity) %>% mutate(index=1:n()) %>% 
+  ggplot(aes(xend=0,y=index,x=time_to_event,yend=index,colour=ethnicity,shape=factor(vital_status)))+geom_segment()+geom_point()+
+  xlab("Time to Event(years)")+ylab("")+scale_shape_discrete(name="Status",labels=c("Censored","Death"))+theme_classic()
+
+ethnicity_LUAD_plot <- LUAD_modified %>% arrange(ethnicity) %>% mutate(index=1:n()) %>% 
+  ggplot(aes(xend=0,y=index,x=time_to_event,yend=index,colour=ethnicity,shape=factor(vital_status)))+geom_segment()+geom_point()+
+  xlab("Time to Event(years)")+ylab("")+theme(legend.position="none")+theme_classic()
+
+#ggarrange(race_LUSC_plot,race_LUAD_plot,nrow=2,common.legend = TRUE,legend="bottom")
+ggarrange(ethnicity_LUSC_plot,ethnicity_LUAD_plot,common.legend=TRUE,legend="bottom",nrow =1,labels=c("LUSC","LUAD"),hjust=-1.0)
+
+```
+  
+<div class = "black">
+The ethnicity variable has 2 unique values: hispanic or latino and not hispanic or latino. The non hispanic or latino category has insignificant frequency in both LUSC and LUAD. Therefore, we will drop this variable.
+</div>
+&nbsp;
+
+**Race**
+&nbsp;
+
+```{r explore race}
+race_LUSC_plot <- LUSC_modified %>% arrange(race) %>% mutate(index=1:n()) %>% 
+  ggplot(aes(xend=0,y=index,x=time_to_event,yend=index,colour=race,shape=factor(vital_status)))+geom_segment()+geom_point()+xlab("Time to Event(years)")+ylab("")+scale_color_discrete(name="Race(LUSC)")+scale_shape_discrete(name="Status",labels=c("Censored","Death"))+theme_classic()+labs(title="LUSC")
+
+race_LUAD_plot <- LUAD_modified %>% arrange(race) %>% mutate(index=1:n()) %>% 
+  ggplot(aes(xend=0,y=index,x=time_to_event,yend=index,colour=race,shape=factor(vital_status)))+geom_segment()+geom_point()+
+xlab("Time to Event(years)")+ylab("")+scale_color_discrete(name="Race(LUAD)")+scale_shape_discrete(name="Status",labels=c("Censored","Death"))+ theme_classic()+labs(title="LUAD")
+
+race_LUSC_plot
+kable(table(LUSC_modified$race),booktabs=T) %>% kable_styling(full_width=FALSE,position="float_left")
+race_LUAD_plot
+kable(table(LUAD_modified$race),booktabs=T) %>% kable_styling(full_width=FALSE,position="left")
+```
+   
+<div class = "black">
+The race variable has  3 and 4 unique values in LUSC and LUAD respectively however, only the white and African American categories are represented with significant frequency. So, we will retain this feature but combine call minority categories into one. So, we will have two categories in this column: white, and other
+</div>
+
+&nbsp;  
+
+## Step3 - Data cleaning  
+  
+<div class = "black">
+Based on the results above, we will do the following to clean the data  
+* Drop ethnicity  
+* Delete the missing values from stage_m, stage_n, pathologic_stage, race, and smoking history columns 
+* Combine Asian, American Indian, Black or African american into one category called "other" in the race column  
+</div>
+
+```{r datacleaningandtransform}
+#Deleting rows with missing data in pathalogic_stage(x rows),stage_m(xrows),smoking_history(x rows)
+LUSC_nomissing_values <- LUSC_modified %>% select(!ethnicity) %>% filter(!is.na(pathologic_stage)) %>% filter(!is.na(stage_m)) %>% filter(!is.na(stage_n)) %>% filter(!is.na(smoking_history)) %>% filter(!is.na(race)) 
+
+LUAD_nomissing_values <- LUAD_modified %>% select(!ethnicity) %>% filter(!is.na(pathologic_stage)) %>% filter(!is.na(stage_m)) %>% filter(!is.na(smoking_history)) %>% filter(!is.na(race)) 
+
+LUSC_nomissing_values <- LUSC_nomissing_values %>% mutate(race=ifelse(race!="white","other",race))
+LUAD_nomissing_values <- LUAD_nomissing_values %>% mutate(race=ifelse(race!="white","other",race))
+
+```
+&nbsp;
+
+**Now that we have clean data, let's explore each variable**  
+&nbsp;
+
+#Data Exploration  
+##Gender  
+
+``` {r gendervisualization}
+
+table_gender_LUSC <- xtabs(~gender+vital_status,data=LUSC_nomissing_values)
+gender_LUSC <- LUSC_nomissing_values %>% arrange(gender) %>% mutate(index=1:n()) %>% 
+  ggplot(aes(xend=0,y=index,x=time_to_event,yend=index,colour=gender,shape=factor(vital_status)))+
+  geom_segment()+geom_point()+ theme_classic()+xlab("Time to Event(years)")+ylab("")+  scale_shape_discrete(name="Status",labels=c("Censored","Event"))
+
+table_gender_LUAD <- xtabs(~gender+vital_status,data=LUAD_nomissing_values)
+gender_LUAD <- LUAD_nomissing_values %>% arrange(gender) %>% mutate(index=1:n()) %>% 
+  ggplot(aes(xend=0,y=index,x=time_to_event,yend=index,colour=gender,shape=factor(vital_status)))+
+  geom_segment()+geom_point()+ theme_classic()+ xlab("Time to Event(years)")+ylab("")
+
+ggarrange(gender_LUSC,gender_LUAD,nrow=1,common.legend=TRUE,legend="bottom",labels=c("LUSC","LUAD"),hjust=0.0)
+```
+
+`r kable(table_gender_LUSC,booktabs=T) %>% kable_styling(full_width=FALSE,position="float_left")`
+`r kable(table_gender_LUAD,booktabs=T) %>% kable_styling(full_width=FALSE,position="center")`
+
+<div class = "black">
+* LUSC has more male subjects
+* LUAD has a more balanced sample of males and females 
+* Males and females experience similar event rates regardless of the type od lung cancer
+</div>
+
+## Age
+
+``` {r age visualization}
+#Age
+#Check age distribution
+LUSC_nomissing_values$age <- as.numeric(LUSC_nomissing_values$age)
+age_LUSC <- LUSC_nomissing_values %>% ggplot(aes(x=age))+geom_histogram(aes(y=..density..),color="black",fill="white")+
+  geom_density(alpha=0.2,fill="#FF6666")+geom_vline(aes(xintercept=mean(age)),color="blue")+theme_classic()
+
+
+LUAD_nomissing_values$age <- as.numeric(LUAD_nomissing_values$age)
+age_LUAD<-LUAD_nomissing_values %>% ggplot(aes(x=age))+geom_histogram(aes(y=..density..),color="black",fill="white")+
+  geom_density(alpha=0.2,fill="#FF6666")+geom_vline(aes(xintercept=mean(age)),color="blue")+theme_classic()
+
+ggarrange(age_LUSC,age_LUAD,nrow=1,common.legend=TRUE,legend="bottom",labels=c("LUSC","LUAD"),hjust=0.0)
+```
+
+<div class = "black">
+* LUSC seems to have slightly left skewed age distribution while LUAD has a symmetric distribution with two bi modal peaks 
+* Mean and median age for LUSC are `r mean(LUSC_nomissing_values$age)` and  `r median(LUSC_nomissing_values$age)`  
+* Mean and median age for LUAD are `r mean(LUAD_nomissing_values$age)` and `r mean(LUAD_nomissing_values$age)`
+
+Kaplan Meier estimates do not handle conitnuous variables. So, we are going to convert age into a categorical variable and divide it into two categories:  
+* For LUSC: above 69 and below 69
+* For LUAD: above 65 and below 65 
+</div>
+
+```{r change age to category}
+LUSC_nomissing_values <- LUSC_nomissing_values %>% mutate(agecat=ifelse(age>=65,"above69","below69"))
+LUAD_nomissing_values <- LUAD_nomissing_values %>% mutate(agecat=ifelse(age>=65,"above65","below65"))
+
+
+table_age_LUSC <- xtabs(~agecat+vital_status,data=LUSC_nomissing_values)
+age_LUSC <- LUSC_nomissing_values %>% arrange(agecat) %>% mutate(index=1:n()) %>% 
+  ggplot(aes(xend=0,y=index,x=time_to_event,yend=index,colour=agecat,shape=factor(vital_status)))+
+  geom_segment()+geom_point()+theme_classic()+xlab("Time to Event(years)")+ylab("")+  scale_shape_discrete(name="Status",labels=c("Censored","Event"))+theme(legend.title = element_blank())
+
+table_age_LUAD <- xtabs(~agecat+vital_status,data=LUAD_nomissing_values)
+age_LUAD <- LUAD_nomissing_values %>% arrange(agecat) %>% mutate(index=1:n()) %>% 
+  ggplot(aes(xend=0,y=index,x=time_to_event,yend=index,colour=agecat,shape=factor(vital_status)))+     geom_segment()+geom_point()+theme_classic()+xlab("Time to Event(years)")+ylab("")+guides(shape=FALSE)+theme(legend.title = element_blank())
+
+ggarrange(age_LUSC,age_LUAD,nrow=1,labels=c("LUSC","LUAD"),hjust=0.0)
+kable(table_age_LUSC,"html",booktabs=T) %>% kable_styling(full_width=F,position="float_left")
+kable(table_age_LUAD,"html",booktabs=T) %>% kable_styling(full_width=F,position="left")
+```
+
+## Pathologic stage
+```{r pathologic_stage visualization}
+table_ps_LUSC<- ggtexttable(round(colPerc(xtabs(~pathologic_stage+vital_status,data=LUSC_nomissing_values)),digits = 0))
+pathologic_stage_LUSC <- LUSC_nomissing_values %>% arrange(pathologic_stage) %>% mutate(index=1:n()) %>% 
+  ggplot(aes(xend=0,y=index,x=time_to_event,yend=index,colour=pathologic_stage,shape=factor(vital_status)))+
+  geom_segment()+geom_point()+theme_classic()+xlab("Time to Event(years)")+ylab("")+
+  scale_shape_discrete(name="Status",labels=c("Censored(0)","Event(1)"))+labs(title="LUSC")
+pathologic_stage_LUSC <- ggarrange(pathologic_stage_LUSC,table_ps_LUSC,ncol=2,widths=c(2,1))
+pathologic_stage_LUSC+annotate("text",x=0.85,y=0.85,label="% values for each stage")
+
+table_ps_LUAD <- ggtexttable(round(colPerc(xtabs(~pathologic_stage+vital_status,data=LUAD_nomissing_values)),digits=0))
+pathologic_stage_LUAD <- LUAD_nomissing_values %>% arrange(pathologic_stage) %>% mutate(index=1:n()) %>%     ggplot(aes(xend=0,y=index,x=time_to_event,yend=index,colour=pathologic_stage,shape=factor(vital_status)))+geom_segment()+geom_point()+theme_classic()+xlab("Time to Event(years)")+ylab("")+
+  scale_shape_discrete(name="Status",labels=c("Censored (0)","Event(1)"))+labs(title="LUAD")
+
+pathologic_stage_LUAD <- ggarrange(pathologic_stage_LUAD,table_ps_LUAD,ncol=2,widths=c(2,1))
+pathologic_stage_LUAD+annotate("text",x=0.85,y=0.85,label="% values for each stage")
+
+```
+
+<div class = "black">
+* There are more patients with stage 1 cancer than other stages in both LUSC and LUAD
+* Patients with stage 3 have a much higher event rate in both LUSC and LUAD
+* In LUSC, there are very few samples for patients with stage 4. This might cause non-convergence problem with cox regression. Therefore, we will delete these records before implementing survival analysis.
+* The disease stage sub categories, such as 1a and 1b describe slight variations in disease progression (ie. tumor size) and modeling might not benefit from separating them. We will transform the data to re-class the sub categories based on the main stage
+</div>
+
+## Stage T,N,M
+### LUSC 
+```{r LUSC_TNM_visual,fig.fullwidth=TRUE}
+#Stage_t
+table_staget_LUSC <- tableGrob(as.table(round(colPerc(xtabs(~stage_t+vital_status,data=LUSC_nomissing_values)),digits=0)),theme=ttheme_default(base_size=10))
+tstage_LUSC<- LUSC_nomissing_values %>% arrange(stage_t) %>% mutate(index=1:n()) %>% 
+  ggplot(aes(xend=0,y=index,x=time_to_event,yend=index,colour=stage_t,shape=factor(vital_status)))+
+  geom_segment()+geom_point()+guides(shape=FALSE)+theme(legend.position = "top")+
+  xlab("Time to Event(years)")+ylab("")+guides(shape=FALSE)+theme_classic()
+
+#Stage_n
+ table_stagen_LUSC <- tableGrob(as.table(round(colPerc(xtabs(~stage_n+vital_status,data=LUSC_nomissing_values)),digits = 0)),theme=ttheme_default(base_size=10))
+ nstage_LUSC <- LUSC_nomissing_values %>% arrange(stage_n) %>% mutate(index=1:n()) %>% 
+   ggplot(aes(xend=0,y=index,x=time_to_event,yend=index,colour=stage_n,shape=factor(vital_status)))+
+   geom_segment()+geom_point()+xlab("Time to Event(years)")+ylab("")+theme(legend.position = "top")+guides(shape=FALSE)+theme_classic()
+
+# #Stage_m
+ table_stagem_LUSC<-tableGrob(as.table(round(colPerc(xtabs(~stage_m+vital_status,data=LUSC_nomissing_values)),digits=0)),theme=ttheme_default(base_size=10))
+ mstage_LUSC <- LUSC_nomissing_values %>% arrange(stage_m) %>% mutate(index=1:n()) %>% 
+   ggplot(aes(xend=0,y=index,x=time_to_event,yend=index,colour=stage_m,shape=factor(vital_status)))+ geom_segment()+geom_point()+
+    xlab("Time to Event(years)")+ylab("")+theme(legend.position="bottom")+ scale_shape_discrete(name="Status",labels=c("Censored","Event"))+theme_classic()
+
+tstage_LUSC <- ggarrange(tstage_LUSC,table_staget_LUSC)
+tstage_LUSC+annotate("text",x=0.80,y=0.8,label="% values for each stage")
+nstage_LUSC <- ggarrange(nstage_LUSC,table_stagen_LUSC)
+nstage_LUSC+annotate("text",x=0.80,y=0.7,label="% values for each stage")
+mstage_LUSC <- ggarrange(mstage_LUSC,table_stagem_LUSC)
+mstage_LUSC+annotate("text",x=0.80,y=0.7,label="% values for each stage")
+
+```
+
+<div class = "black">
+* Most of the patients have tumor type *t2* which means the tumor is larger than 3cm and is partially clogging the airways.
+* The majority of the patients have *n0* which means the cancer has not spread to lymph nodes
+* There are some patients with *n1* which means the cancer has spread to lymph nodes within the lungs 
+* The majority of the patients have *mo* which means the cancer has not spread to other parts of the body 
+* mx means metastasis cannot be assessed 
+* There are very few patients within stage *m1* and *nx*, which might also cause non-convergence problem, therefore, m1 and nx records were deleted.
+</div>
+
+###LUAD
+```{r LUAD_tnm_visal,fig.fullwidth=TRUE}
+#Stage_t
+table_staget_LUAD<- tableGrob(as.table(round(colPerc(xtabs(~stage_t+vital_status,data=LUAD_nomissing_values)),digits=0)),theme=ttheme_default(base_size=10))
+tstage_LUAD<- LUAD_nomissing_values %>% arrange(stage_t) %>% mutate(index=1:n()) %>% 
+  ggplot(aes(xend=0,y=index,x=time_to_event,yend=index,colour=stage_t,shape=factor(vital_status)))+
+  geom_segment()+geom_point()+guides(shape=FALSE)+theme(legend.position = "top")+
+  xlab("Time to Event(years)")+ylab("")+guides(shape=FALSE)+theme_classic()
+
+#Stage_n
+ table_stagen_LUAD <- tableGrob(as.table(round(colPerc(xtabs(~stage_n+vital_status,data=LUAD_nomissing_values)),digits = 0)),theme=ttheme_default(base_size=10))
+ nstage_LUAD <- LUAD_nomissing_values %>% arrange(stage_n) %>% mutate(index=1:n()) %>% 
+   ggplot(aes(xend=0,y=index,x=time_to_event,yend=index,colour=stage_n,shape=factor(vital_status)))+
+   geom_segment()+geom_point()+xlab("Time to Event(years)")+ylab("")+theme(legend.position = "top")+guides(shape=FALSE)+theme_classic()
+
+# #Stage_m
+ table_stagem_LUAD<-tableGrob(as.table(round(colPerc(xtabs(~stage_m+vital_status,data=LUAD_nomissing_values)),digits=0)),theme=ttheme_default(base_size=10))
+ mstage_LUAD <- LUAD_nomissing_values %>% arrange(stage_m) %>% mutate(index=1:n()) %>% ggplot(aes(xend=0,y=index,x=time_to_event,yend=index,colour=stage_m,shape=factor(vital_status)))+ geom_segment()+geom_point()+
+    xlab("Time to Event(years)")+ylab("")+theme(legend.position="bottom")+ scale_shape_discrete(name="Status",labels=c("Censored","Event"))+theme_classic()
+
+tstage_LUAD <- ggarrange(tstage_LUAD,table_staget_LUAD)
+tstage_LUAD+annotate("text",x=0.80,y=0.8,label="% values for each stage")
+nstage_LUAD <- ggarrange(nstage_LUAD,table_stagen_LUAD)
+nstage_LUAD+annotate("text",x=0.80,y=0.7,label="% values for each stage")
+mstage_LUAD <- ggarrange(mstage_LUAD,table_stagem_LUAD)
+mstage_LUAD+annotate("text",x=0.80,y=0.7,label="% values for each stage")
+
+```
+  
+<div class = "black">
+* LUAD has the same patterns observed in LUSC. We will also transform the subcategories to the main category in the cancer stage and stages t,n, and m. 
+</div>
+
+```{r cleaning pathologic stages}
+#function to clean pathologic stages 
+change_pathologic_stages <- function(x){
+  x <- x %>% mutate(pathologic_stage=ifelse(pathologic_stage=="stage ia","stage i",
+         ifelse(pathologic_stage=="stage ib", "stage i",
+         ifelse(pathologic_stage =="stage iia", "stage ii",
+         ifelse(pathologic_stage=="stage iib", "stage ii",
+         ifelse(pathologic_stage=="stage iiia", "stage iii",
+         ifelse(pathologic_stage=="stage iiib", "stage iii", pathologic_stage))))))) 
+  
+  x<-  x %>% mutate(stage_m=ifelse(stage_m=="m1a","m1",
+              ifelse(stage_m=="m1b","m1",stage_m)))
+
+  x %>% mutate(stage_t=ifelse(stage_t=="t1a","t1",
+        ifelse(stage_t=="t1b", "t1",
+        ifelse(stage_t=="t2a", "t2",
+        ifelse(stage_t=="t2b", "t2",stage_t)))))
+}
+
+LUSC_nomissing_values <- change_pathologic_stages(LUSC_nomissing_values)
+LUAD_nomissing_values <- change_pathologic_stages(LUAD_nomissing_values)
+
+```
+ 
+##Smoking History
+``` {r Smoking history}
+
+ table_sh_LUSC <- xtabs(~smoking_history+vital_status,data=LUSC_nomissing_values)
+ smoking_LUSC <- LUSC_nomissing_values %>% arrange(smoking_history) %>% mutate(index=1:n()) %>% 
+   ggplot(aes(xend=0,y=index,x=time_to_event,yend=index,colour=smoking_history,shape=factor(vital_status)))+ geom_segment()+geom_point()+scale_shape_discrete(name="Status",labels=c("Censored","Event"))+
+    xlab("Time to Event(years)")+ylab("")+theme(legend.box = "vertical")+theme_classic()
+ 
+ table_sh_LUAD <-xtabs(~smoking_history+vital_status,data=LUAD_nomissing_values)
+ smoking_LUAD <- LUAD_nomissing_values %>% arrange(smoking_history) %>% mutate(index=1:n()) %>% 
+   ggplot(aes(xend=0,y=index,x=time_to_event,yend=index,colour=smoking_history,shape=factor(vital_status)))+ geom_segment()+geom_point()+ xlab("Time to Event(years)")+ylab("")+theme_classic()+theme(legend.position = "none")
+ 
+ ggarrange(smoking_LUSC,smoking_LUAD,nrow=1,common.legend = TRUE,legend="bottom",labels=c("LUSC","LUAD"),hjust=0.0)
+ kable(table_sh_LUSC,"html",booktabs=T) %>% kable_styling(full_width=FALSE,position="float_left")
+ kable(table_sh_LUAD,"html",booktabs=T) %>% kable_styling(full_width=FALSE,position="center")
+```
+
+<div class = "black"> 
+ * LUAD has more non-smokers. This is expected as this is the most common lung cancer in non-smokers. 
+ 
+</div>
+
+```{r secondcleaning}
+#dropping values that do not have significant frequency in staget,n,m columns 
+
+LUSC_nomissing_values <- LUSC_nomissing_values %>% mutate(smoking_history=ifelse(smoking_history=="current reformed smoker, duration not specified" | smoking_history=="current reformed smoker for > 15 years" | smoking_history=="current reformed smoker for < or = 15 years","reformed smoker",smoking_history))
+
+LUAD_nomissing_values <- LUAD_nomissing_values %>% mutate(smoking_history=ifelse(smoking_history=="current reformed smoker, duration not specified" | smoking_history=="current reformed smoker for > 15 years" | smoking_history=="current reformed smoker for < or = 15 years","reformed smoker",smoking_history))
+
+numeric <- c(1,6)
+factor <- c(4,5,7,8,9,10,11,12)
+
+LUSC_nomissing_values[,numeric] <- sapply(LUSC_nomissing_values[,numeric],as.numeric)
+LUSC_nomissing_values[,factor] <- lapply(LUSC_nomissing_values[,factor],as.factor)
+LUAD_nomissing_values[,numeric] <- sapply(LUAD_nomissing_values[,numeric],as.numeric)
+LUAD_nomissing_values[,factor] <- lapply(LUAD_nomissing_values[,factor],as.factor)
+LUSC_nomissing_values$smoking_history <- factor(LUSC_nomissing_values$smoking_history,levels=c("current smoker","reformed smoker","lifelong non-smoker"))
+LUAD_nomissing_values$smoking_history <- factor(LUAD_nomissing_values$smoking_history,levels=c("current smoker","reformed smoker","lifelong non-smoker"))
+
+#dropping values that do not have significant frequency in staget,n,m columns
+ LUSC_model <- LUSC_nomissing_values %>% filter(pathologic_stage!="stage iv") %>% droplevels()
+ LUSC_model <- LUSC_model %>% filter(stage_n!="n3") %>% droplevels()
+ LUSC_model <- LUSC_model %>% filter(stage_n!="nx") %>% droplevels()
+ LUSC_model <- LUSC_model %>% filter(stage_m!="m1") %>% droplevels()
+
+ LUAD_model <- LUAD_nomissing_values %>% filter(stage_t!="tx") %>% droplevels()
+ LUAD_model <- LUAD_model %>% filter(stage_n!="n3") %>% droplevels()
+ LUAD_model <- LUAD_model %>% filter(stage_n!="nx") %>% droplevels()
+# LUAD_model <- LUAD_model %>% filter(pathologic_stage!="stage iv") %>% droplevels()
+ 
+```
+
+&nbsp;
+
+<div class = "black">
+Before we proceed to survival analysis, lets summarize data cleaning and preparation so far 
+* Eliminated Ethnicity column
+* Transformed all low populated subcategories(Black or african american, asian, alskan indian) to "other" in the race column
+* Converted age to a categorical variable
+* Transformed sub categories to main categories in pathological and t,n,m stage columns
+* The final data set consists of 350 and 412 records for LUSC and LUAD respectively
+</div>
+  
+#Survival Analysis
+<div class = "blue">
+* We will use **survminer** and **survival** packages in R for this analysis 
+* First, we will estimate survival rates for LUSC and LUAD using Kaplan Meir(KM) method.
+* KM method generates plots of survival probablity versus time and summaries of data including median survival times and confidence intervals(CI)
+* Survival curves will be compared using a log rank statistic with a significance level of 0.05
+* Next, we will perform a univariate analysis (one independent variable at a time) for LUSC and LUAD using KM and Cox proportional hazards methods.   
+  + This will allow us to check the impact of each factor on survival and whether groups within each variable have different survival curves. For eg. do survival rates differ between men and women under the gender variable?  
+  + For variables that show statistically-significant differences and have more than 2 unique values or groups, we will also do a pair wise comparison  
+  + Before generating a model using the Cox proportional hazards method, we will verify the proportional hazards assumption using schonfeld residues and p-value for the corresponding chi-squared distribution    
+* Based on the results from the univariate analysis, we will choose variables for the multivariate analysis and predict a model using Cox proportional hazards regression model 
+</div>
+
+## Survival rates for LUSC and LUAD 
+```{r LUSC_LUAD_survivalrates}
+# KM_LUSC_LUAD <- with(LUSC_LUAD,Surv(times,patient.vital_status))
+KM_LUSC_LUAD <- survfit(Surv(times,patient.vital_status) ~ admin.disease_code,data=LUSC_LUAD_modified)
+ggsurvplot(KM_LUSC_LUAD,pval=TRUE, pval.size=3,surv.median.line = "hv",legend="right",title="Survival curves for LUSC and LUAD",legend.title="",legend.labs=c("LUAD","LUSC"),font.main=c(14),font.x=c(12),font.y=c(12),font.tickslab=c(10),xlab="Time in years",risk.table = TRUE,risk.table.y.text=FALSE,risk.table.y.text.col=T,risk.table.height=0.3,risk.table.fontsize=3)
+kable(summary(KM_LUSC_LUAD)$table[,7:9],"html",booktabs=T)%>%kable_styling(full_width=TRUE)
+#test <- survdiff(formula= Surv(times,patient.vital_status)~admin.disease_code,data=LUSC_LUAD)
+#test
+
+```
+ 
+<div class = "black"> 
+* The one-,three-, and five- year survival rates for LUSC and LUAD are 81.1% versus 85.5%, 55.7% versus58.2%, and 43.6% versus 33.8%, respectively. 
+* The log rank test statistic of chisq= 0.3 with a p-value of 0.56 tells us that there is not enough statistical evidence to reject the null hypothesis and therefore allows us to conclude the survival curves are not significantly different for LUSC and LUAD 
+</div>
+
+## Univariate analysis (LUSC)
+
+### KM survival curves 
+ 
+```{r KMLUSC}
+covariates <- c("gender","agecat","race","smoking_history","pathologic_stage","stage_t","stage_n","stage_m")
+KM_LUSC_formula <- sapply(covariates,function(x) as.formula(paste('Surv(time_to_event,vital_status)~',x)))
+KM_LUSC_models <- lapply(KM_LUSC_formula,function(x){surv_fit(x,data=LUSC_model)})
+KM_LUSC_survdiff <- lapply(KM_LUSC_formula,function(x){survdiff(x,data=LUSC_model)})
+KM_LUSC_median <- lapply(KM_LUSC_models,function(x){summary(x)$table[,7:9]})
+KM_LUSC_plots <- lapply(KM_LUSC_models,function(x){ggsurvplot(x,pval=TRUE,pval.size=3,surv.median.line = "hv",xlab="Time in Years",font.main=c(14),font.tickslab=c(10),font.x=c(12),font.y=c(12),legend="top",legend.title="",risk.table = TRUE, risk.table.y.text=FALSE, risk.table.col="strata",risk.table.fontsize=3,risk.table.height=0.3,conf.int=TRUE,conf.int.style="step")+guides(colour=guide_legend(nrow=2))})
+#KM_LUSC_median <- do.call(rbind,KM_LUSC_median)
+#KM_LUSC_median<- as.data.frame(KM_LUSC_median)
+#rownames(KM_LUSC_median) <- gsub("^[^=]*=","",rownames(KM_LUSC_median))
+KM_LUSC_results <- bind_rows(lapply(KM_LUSC_survdiff,function(x){glance(x)}),.id="category")
+KM_LUSC_results <- as.data.frame(KM_LUSC_results)
+names(KM_LUSC_results)[names(KM_LUSC_results)=="statistic"] <- "chisq" 
+kable(KM_LUSC_results,"html",booktabs=T,caption= "Chisq and p-values for LUSC from Kaplan Meier estimates") %>% kable_styling(full_width=TRUE)
+
+```
+  
+<div class = "black">  
+* The p-values and chi squared values of the log rank statistic from the univariate analysis using KM revealed that there are no statistically significant differences in overall survival curves between groups within a variable  
+* The survival curves for all categories(see below) show a steep decline in the initial years indicating poor prognosis from the disease.
+
+</div>
+     
+```{r LUSC KM plots,fig.fullwidth=TRUE}
+arrange_ggsurvplots(KM_LUSC_plots[1:2]) 
+kable(round(KM_LUSC_median$gender,digits=2),"html",booktabs=T) %>% kable_styling(full_width=FALSE,position="float_left")
+kable(round(KM_LUSC_median$agecat,digits=2),"html",booktabs=T) %>% kable_styling(full_width=FALSE,position="center")
+
+arrange_ggsurvplots(KM_LUSC_plots[3]) 
+sh_plot <- ggsurvplot(KM_LUSC_models$smoking_history,pval=TRUE,pval.size=3,surv.median.line = "hv",xlab="Time in Years",font.main=c(14),font.tickslab=c(10),font.x=c(12),font.y=c(12),legend="top",legend.title="",risk.table = TRUE, risk.table.y.text=FALSE, risk.table.col="strata",risk.table.fontsize=3,risk.table.height=0.3,conf.int=TRUE,conf.int.style="step",legend.labs=c("current smoker","reformed smoker","non-smoker"))+guides(colour=guide_legend(nrow=2))
+kable(round(KM_LUSC_median$race,digits=2),"html",booktabs=T) %>% kable_styling(full_width=FALSE,position="float_left")
+sh_plot
+kable(round(KM_LUSC_median$smoking_history,digits=2),"html",booktabs=T) %>% kable_styling(full_width=FALSE,position="center")
+
+arrange_ggsurvplots(KM_LUSC_plots[5:6])
+kable(round(KM_LUSC_median$pathologic_stage,digits=2),"html",booktabs=T) %>% kable_styling(full_width=FALSE,position="float_left")
+kable(round(KM_LUSC_median$stage_t,digits=2),"html",booktabs=T) %>% kable_styling(full_width=FALSE,position="float_left")
+arrange_ggsurvplots(KM_LUSC_plots[7:8])
+kable(round(KM_LUSC_median$stage_n,digits=2),"html",booktabs=T) %>% kable_styling(full_width=FALSE,position="float_left")
+kable(round(KM_LUSC_median$stage_m,digits=2),"html",booktabs=T) %>% kable_styling(full_width=FALSE,position="left")
+
+```
+  
+&nbsp;
+&nbsp;
+
+### Cox proportional hazards model 
+
+####Testing proportional Hazard assumption
+
+For each variable, the proportional hazard assumption was checked using a statistical test and schoenfeld residue plots. **cox.zph** function in R tests the independence between schoenfeld residuals and time. The proportional hazards assumption is supported by a non-significant relationship between residuals and time.
+
+```{r cox_LUSC}
+cox_covariates <- c("gender","agecat","race","smoking_history","pathologic_stage","stage_t","stage_n","stage_m")
+cox_LUSC_formula <- sapply(cox_covariates,function(x) as.formula(paste('Surv(time_to_event,vital_status)~',x)))
+ cox_LUSC_models <- lapply(cox_LUSC_formula,function(x){coxph(x,data=LUSC_model)})
+ cox_LUSC_results <- lapply(cox_LUSC_models[1:3],function(x){ 
+                      x <- summary(x)
+                      p.value<-round(x$wald["pvalue"],digits=2)
+                      wald.test<- round(x$wald["test"],digits=2)
+                      beta<-round(x$coef[1],digits=2);#coeficient beta
+                      HR <-round(x$coef[2],digits = 2);#exp(beta)
+                      pval <- round(x$coef[5],digits=2);
+                      HR.confint.lower <- round(x$conf.int[,"lower .95"],digits=2)
+                      HR.confint.upper <- round(x$conf.int[,"upper .95"],digits=2)
+                      res<-c(beta, HR, HR.confint.lower,HR.confint.upper,pval,wald.test, p.value)
+                      names(res)<-c("beta", "HR","95%CI(lower)","95%CI(upper)","p-value","wald.test","wald.p.value")
+                      return(res)
+                      })
+ cox_ph <- lapply(cox_LUSC_models,function(x){cox.zph(x,terms=FALSE)})
+ cox_ph_table <- lapply(cox_ph,function(x){x$table})
+ cox_ph_table <- do.call(rbind,cox_ph_table)
+ cox_ph_table <- subset(cox_ph_table,rownames(cox_ph_table) != "GLOBAL")
+ res_LUSC <- t(as.data.frame(cox_LUSC_results, check.names = FALSE))
+ res_LUSC <- as.data.frame(res_LUSC)
+```
+
+&nbsp;
+
+<div class = "black">
+* The p-values are high for all variables except race,indicating that they are not statistically significant. This means that proportional hazard assumption is valid for all variables except race. So, cox regression might not be a good fit to model this variable. We will not attempt any methods to fix this, since this majority of this variable consists of one value and this might not be useful. 
+* The schoenfelds plots for all variables show a random distribution around the mean of 0 validating the proportional hazards assumption
+</div>
+
+&nbsp;
+
+```{r coxph_LUSC}
+ggcoxzph(cox_ph$gender)
+cox_ph$gender
+ggcoxzph(cox_ph$age)
+cox_ph$age
+ggcoxzph(cox_ph$race)
+cox_ph$age
+ggcoxzph(cox_ph$pathologic_stage)
+cox_ph$pathologic_stage
+ggcoxzph(cox_ph$stage_t)
+cox_ph$stage_t
+ggcoxzph(cox_ph$stage_n)
+cox_ph$stage_n
+ggcoxzph(cox_ph$stage_m)
+cox_ph$stage_m
+
+```
+&nbsp;
+
+####Cox Model LUSC (Univariate)
+ 
+`r kable(res_LUSC,"html",booktabs=T,caption="Table: Results from Univariate analysis using cox method ") %>%  kable_styling(full_width=TRUE)`
+
+```{r coxmodel_LUSC}
+cox_LUSC_sh_ps_HR <- lapply(cox_LUSC_models[4:8],function(x){
+ beta <- round(summary(x)$coef[,1],digits=2);
+ HR <- round(summary(x)$coef[,2],digits = 2);
+ HR.confint.lower <- round(summary(x)$conf.int[,"lower .95"],digits=2)
+ HR.confint.upper <- round(summary(x)$conf.int[,"upper .95"],digits=2)
+ pval <- round(summary(x)$coef[,5],digits=2);
+ res <- cbind(beta,HR,HR.confint.lower,HR.confint.upper,pval)
+ #names(res) <- c("beta", "HR","95%CI(lower)","95%CI(upper)","p value")
+return(res)
+}
+)
+cox_LUSC_sh_ps_HR <- as.data.frame(do.call(rbind,cox_LUSC_sh_ps_HR))
+rownames(cox_LUSC_sh_ps_HR) <- c("reformed smoker","lifelong nonsmoker","pathologic_stage2","pathologic_stage3","staget2","staget3","staget4","stagen1","stagen2","stagemx")
+names(cox_LUSC_sh_ps_HR) <- c("beta","HR","95%CI (L)","95%CI (U)","p value")
+
+cox_LUSC_sh_ps_pvalues <- lapply(cox_LUSC_models[4:8],function(x){
+   p <- round(summary(x)$wald["pvalue"],digits=2)
+   t <- round(summary(x)$wald["test"],digits=2)
+   res1 <- c(t,p)
+   names(res1) <- c("wald.test","p.value")
+   return(res1)
+})
+cox_LUSC_sh_ps_pvalues <- do.call(rbind,cox_LUSC_sh_ps_pvalues)
+kable(cox_LUSC_sh_ps_HR,"html",align="l") %>% kable_styling(full_width=FALSE,position="float_left")
+kable(cox_LUSC_sh_ps_pvalues,"html",booktabs=T) %>% kable_styling(full_width=FALSE,position="left")
+
+```
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+<div class = "black">
+* The table above shows the regression beta coefficients, hazard ratios, confidence intervals for hazard ratios, and statistical significance (wald test and p value) of each variable in relation to overall survival. Each variable has been assessed independently via separate Cox regressions.  
+* From the output above, we can see that the p-values from wald test are similar to those obtained from KM estimates suggesting:
+  + none of the variables are statistically significant for overall survival 
+  + groups within a variable dont have significantly different survival rates 
+  + all confidence intervals include the NULL value which also indicates that they are not statistically significant   
+  
+</div>
+
+&nbsp;
+
+<div class = "black">
+**Based on the results from KM estimates and the Cox model, we can conclude that, for LUSC, none of the variables are statistically significant for overall survival **
+</div>
+
+## Univariate Analysis LUAD 
+
+### KM method
+```{r KMLUAD}
+KM_LUAD_formula <- sapply(covariates,function(x) as.formula(paste('Surv(time_to_event,vital_status)~',x)))
+KM_LUAD_models <- lapply(KM_LUAD_formula,function(x){surv_fit(x,data=LUAD_model)})
+KM_LUAD_survdiff <- lapply(KM_LUAD_formula,function(x){survdiff(x,data=LUAD_model)})
+KM_LUAD_median <- lapply(KM_LUAD_models,function(x){summary(x)$table[,7:9]})
+KM_LUAD_plots <- lapply(KM_LUAD_models,function(x){ggsurvplot(x,pval=TRUE,pval.size=3,surv.median.line = "hv",xlab="Time in Years",font.main=c(14),font.tickslab=c(10),font.x=c(12),font.y=c(12),legend="top",legend.title="", risk.table = TRUE,risk.table.y.text=FALSE, risk.table.col="strata",risk.table.fontsize=3,risk.table.height=0.3,conf.int=TRUE,conf.int.style="step")+guides(colour=guide_legend(nrow=2))})
+#KM_LUAD_median <- do.call(rbind,KM_LUAD_median)
+#KM_LUAD_median<- as.data.frame(KM_LUAD_median)
+#rownames(KM_LUAD_median) <- gsub("^[^=]*=","",rownames(KM_LUAD_median))
+KM_LUAD_results <- bind_rows(lapply(KM_LUAD_survdiff,function(x){glance(x)}),.id="category")
+KM_LUAD_results <- as.data.frame(KM_LUAD_results)
+names(KM_LUAD_results)[names(KM_LUAD_results)=="statistic"] <- "chisq"
+
+```
+`r kable(KM_LUAD_results,"html",booktabs=T) %>%  kable_styling(full_width=TRUE)`
+
+<div class = "black">
+* The p-values from the log rank test for variables **pathologic stage,stage t, and stage n** indicate that they are statistically significant indicating that the groups within these variables differ significantly in survival. Interpretations of each individual variable are discussed below. Since each of these variables consist of more than two groups, a pair wise comparison was performed and the results are shown below. 
+
+* The survival curves (see below) for all variables also show a step decline, similar to what was observed in LUSC, in the first five years indicating poor prognosis from the disease
+</div>
+&nbsp;
+
+
+```{r}
+arrange_ggsurvplots(KM_LUAD_plots[1:2]) 
+kable(round(KM_LUAD_median$gender,digits=2),"html",booktabs=T) %>% kable_styling(full_width=FALSE,position="left")
+kable(round(KM_LUAD_median$age,digits=2),"html",booktabs=T) %>% kable_styling(full_width=FALSE,position="left")
+arrange_ggsurvplots(KM_LUAD_plots[3:4]) 
+kable(round(KM_LUAD_median$race,digits=2),"html",booktabs=T) %>% kable_styling(full_width=FALSE,position="float_left")
+kable(round(KM_LUAD_median$smoking_history,digits=2),"html",booktabs=T) %>% kable_styling(full_width=FALSE,position="center")
+```
+
+<div class = "black">
+####**Pathologic stage**
+  * The survival curves show that the survival rate decreases with increasing pathologic stage.  
+  * Patients with stage 1 have a median survival time of ~4.7 years whereas patients with stage 2 and 3 have 2.5 and 1.7 years respectively
+  * Patients with stage 4 cancer have a higher median survival time but it should be noted there are very few patients in this sample 
+  * Pair wise comparisons shows that stage 2 and stage 3 are significantly different from stage 1. However, there is little difference in survival time between stages 2 and 3. 
+  
+&nbsp;  
+
+####**Stage T**
+  * The survival curves show that the survival rate decreases rapidly for stage 3 and 4 in comparison to stage 1 and 2. Correspondingly, their median survival times also indicate the same trend. 
+  * Pair wise comparison shows that 
+    + t1 is not very different from t2 while t3 and t4 are significantly different from t1 
+    + No differences are observed between t2, t3, and t4.
+
+</div>    
+```{r}
+arrange_ggsurvplots(KM_LUAD_plots[5:6]) 
+kable(round(KM_LUAD_median$pathologic_stage,digits=2),"html",booktabs=T) %>% kable_styling(full_width=FALSE,position="float_left")
+kable(round(KM_LUAD_median$stage_t,digits=2),"html",booktabs=T) %>% kable_styling(full_width=FALSE,position="left")
+pw_LUAD_pathologicstage <- pairwise_survdiff(Surv(time_to_event,vital_status)~pathologic_stage,data=LUAD_model)
+symnum(pw_LUAD_pathologicstage$p.value,cutpoints=c(0,0.0001,0.001,0.01,0.05,0.1,1),
+       symbols=c("****","***","**","*","+"," "),na="")
+
+pw_LUAD_staget <- pairwise_survdiff(Surv(time_to_event,vital_status)~stage_t,data=LUAD_model)
+symnum(pw_LUAD_staget$p.value,cutpoints=c(0,0.0001,0.001,0.01,0.05,0.1,1),
+       symbols=c("****","***","**","*","+"," "),na="")
+```
+
+<div class = "black">
+####**Stage N**  
+  * The survival curves show that the survival rate is better for patients with n0 where the cancer has not spread to the lymph nodes while n1 and n2 curves show a steep decline  
+  * The median survival times for n0, n1, and n2 are 4.5, 2.6, and 1.7 years respectively
+  * Pair wise comparison also indicates the same trend :
+    +n0 is significantly different from n1 and n2
+    +no difference between n1 and n2
+</div>
+
+```{r}
+arrange_ggsurvplots(KM_LUAD_plots[7:8]) 
+kable(round(KM_LUAD_median$stage_n,digits=2),"html",booktabs=T) %>% kable_styling(full_width=FALSE,position="float_left")
+kable(round(KM_LUAD_median$stage_m,digits=2),"html",booktabs=T) %>% kable_styling(full_width=FALSE,position="left")
+pw_LUAD_stagen <- pairwise_survdiff(Surv(time_to_event,vital_status)~stage_n,data=LUAD_model)
+symnum(pw_LUAD_stagen$p.value,cutpoints=c(0,0.0001,0.001,0.01,0.05,0.1,1),
+       symbols=c("****","***","**","*","+"," "),na="")
+```
+
+### Cox proportional hazards model 
+####Testing for Cox proportional hazard assumption
+
+```{r cox_LUAD}
+ cox_LUAD_formula <- sapply(cox_covariates,function(x) as.formula(paste('Surv(time_to_event,vital_status)~',x)))
+ cox_LUAD_models <- lapply(cox_LUAD_formula,function(x){coxph(x,data=LUAD_model)})
+ cox_LUAD_results <- lapply(cox_LUAD_models[1:3],
+                      function(x){ 
+                      x <- summary(x)
+                      p.value<-round(x$wald["pvalue"],digits=2)
+                      wald.test<-round(x$wald["test"],digits=2)
+                      beta<-round(x$coef[1],digits=2);#coeficient beta
+                      HR <- round(x$coef[2],digits=2);
+                      pval <- round(x$coef[,5],digits=2);
+                     HR.confint.lower <- round(x$conf.int[,"lower .95"],digits=2)
+                      HR.confint.upper <- round(x$conf.int[,"upper .95"],digits=2)
+      res<-c(beta, HR, HR.confint.lower,HR.confint.upper,pval,wald.test, p.value)
+                names(res)<-c("beta", "HR","95%_CI_lower","95%_CI_upper","p value","wald.test", "wald.p.value")
+                      return(res)
+                          })
+ 
+ cox_ph_LUAD <- lapply(cox_LUAD_models,function(x){cox.zph(x,terms=FALSE)})
+ cox_ph_LUAD_table <- lapply(cox_ph_LUAD,function(x){x$table})
+ cox_ph_LUAD_table <- do.call(rbind,cox_ph_LUAD_table)
+ cox_ph_LUAD_table <- subset(cox_ph_LUAD_table,rownames(cox_ph_LUAD_table) != "GLOBAL")
+ res_LUAD <- t(as.data.frame(cox_LUAD_results, check.names = FALSE))
+ res_LUAD <- as.data.frame(res_LUAD)
+ 
+```
+
+<div class = "black">
+* The p-values are high for all variables indicating that they are not statistically significant. This means that the proportional hazard age assumption is valid for all variables.
+
+* The schoenfelds plots for all variables show a random distribution around the mean of 0  
+</div>
+
+```{r coxphLUAD}
+ggcoxzph(cox_ph_LUAD$gender)
+cox_ph_LUAD$gender
+ggcoxzph(cox_ph_LUAD$age)
+cox_ph_LUAD$age
+ggcoxzph(cox_ph_LUAD$race)
+cox_ph_LUAD$age
+ggcoxzph(cox_ph_LUAD$pathologic_stage)
+cox_ph_LUAD$pathologic_stage
+ggcoxzph(cox_ph_LUAD$stage_t)
+cox_ph_LUAD$stage_t
+ggcoxzph(cox_ph_LUAD$stage_n)
+cox_ph_LUAD$stage_n
+ggcoxzph(cox_ph_LUAD$stage_m)
+cox_ph_LUAD$stage_m
+
+```
+####Cox Model (Univariate)
+ 
+`r kable(res_LUAD,"html",booktabs=T,caption="Univariate analysis using Cox proportion hazards") %>%  kable_styling(full_width=TRUE)`
+
+```{r coxmodelLUAD}
+cox_LUAD_sh_ps_HR <- lapply(cox_LUAD_models[4:8],function(x){
+ beta <- round(summary(x)$coef[,1],digits=2);
+ HR <- round(summary(x)$coef[,2],digits = 2);
+ pval <- round(summary(x)$coef[,5],digits=2);
+ HR.confint.lower <- round(summary(x)$conf.int[,"lower .95"],digits=2)
+ HR.confint.upper <- round(summary(x)$conf.int[,"upper .95"],digits=2)
+ res <- cbind(beta,HR,HR.confint.lower,HR.confint.upper,pval)
+ #names(res) <- c("beta", "HR","95%_CI_lower","95%_CI_upper","p-value")
+return(res)
+}
+)
+cox_LUAD_sh_ps_HR <- as.data.frame(do.call(rbind,cox_LUAD_sh_ps_HR))
+rownames(cox_LUAD_sh_ps_HR) <- c("reformed_smoker","non-smoker","pathologic_stage2","pathologic_stage3","pathologic_stage4","staget2","staget3","staget4","stagen1","stagen2","stagem1","stagemx")
+names(cox_LUAD_sh_ps_HR) <- c("beta", "HR","0.95LCL","0.95UCL","P-value")
+
+cox_LUAD_sh_ps_pvalues <- lapply(cox_LUAD_models[4:8],function(x){
+   p <- round(summary(x)$wald["pvalue"],digits = 2)
+   t <- round(summary(x)$wald["test"],digits=2)
+   res1 <- c(t,p)
+   names(res1) <- c("wald.test","wald.p.value")
+   return(res1)
+})
+cox_LUAD_sh_ps_pvalues <- do.call(rbind,cox_LUAD_sh_ps_pvalues)
+kable(cox_LUAD_sh_ps_HR,"html",align="l") %>% kable_styling(full_width=FALSE,position="float_left") %>% row_spec(0,angle=0)
+kable(cox_LUAD_sh_ps_pvalues,"html",booktabs=T) %>% kable_styling(full_width=FALSE,position="left")
+```
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+&nbsp;
+
+
+* Pathologic stage which denotes overall cancer stage, stage_t representing tumor size, and stage_n representing spread to lymphnodes have highly statistically significant coefficients.
+* All the variables have positive beta coefficients which means they are associated with poor survival
+* The hazard ratios for stage t groups and stage n groups indicate that the hazard rate increases with the increase in tumor size and spread to lymphnodes.
+* For pathologic stage groups,this trend is true for stage 2 and 3. However, stage 4 has a HR similar to that to stage2. This is likely due to the limited sample size. 
+
+##Multivariate analysis for LUAD 
+
+The univariate analysis allowed us to conclude that pathologic stage, stage t, and  stage n are the only variables that are statistically significant for overall survival. However, overall cancer/pathologic stage is always assigned based on stage t, stage n and stage m. Therefore, in any linear modeling technique, we expect to see correlation between tumor stage and pathologic stage and hence wont be useful to model them together. Since there are no other variables that are statistically significant, multivariate analysis provides no added value to the analysis. 
+
+We can however perform a multivariate analysis using two models to see if the predictions from the univariate analysis will still hold true when other covariates are taken into account  
+1) Age, gender, pathologic_stage, smoking_history 
+2) Age, gender, staget, stage_n, stage_m, smoking_history 
+
+### Model 1
+#### Testing the proportional hazards assumption
+
+* Both the p-values and schoenfeld plots show that the proportional hazards assumption is true for all variables 
+
+```{r echo=FALSE}
+cox_multivariate1 <- coxph(Surv(time_to_event,vital_status)~agecat+gender+pathologic_stage+smoking_history,data=LUAD_model)
+#ggforest(cox_multivaraite1,data=LUAD_model)
+#cox.zph(cox_multivariate1)
+```
+
+```{r}
+model1_zph <- cox.zph(cox_multivariate1)
+#kable(model1_zph,"html",booktabs=T) %>% kable_styling(full_width=T)
+ggcoxzph(model1_zph)
+ggforest(cox_multivariate1,data=LUAD_model)
+```
+
+
+<div class = "black">
+* The p-value (xxx) from wald test indicates that the model is significant. 
+* In this model, pathologic stages 2,3, and 4 remain statistically significant (p < 0.05) after taking into account all the other variables 
+* There is also no significant change in effect sizes (beta coefficients) and hazard ratios from the univariate analysis for cancer stage 
+* The p-values together with the beta coefficients and hazard ratios indicate a strong relationship between patient cancer stage and increased risk for death after accounting for other covariates. Therefore, we can conclude that advanced cancer stage is associated with poor prognostic.
+* Interestingly, both age and reformed smoker group within the smoking history yeild borderline significance with p values of 0.06 and 0.05 respectively. However, the CI for both variables include 1 which means that they make smaller contributions to the difference in HR after adjusting for other covariates and only trend toward significance. 
+* It will be useful to model interactions between age, smoking history and cancer stage 
+</div>
+
+### Model 2
+* Includes age, tnm stages t,n and smoking history
+```{r echo=FALSE}
+cox_multivariate2 <- coxph(Surv(time_to_event,vital_status)~agecat+gender+stage_t+stage_n+stage_m+smoking_history,data=LUAD_model)
+#ggforest(cox_multivariate2,data=LUAD_model)
+#summary(cox_multivariate2)
+model2 <- cox.zph(cox_multivariate2)
+ggcoxzph(model2)
+ggforest(cox_multivariate2,data=LUAD_model)
+```
+
+<div class = "black">
+* The wald test p-values indicate that the model is significant.
+* Stages n1 and n2 remain statistically significant (p<0.05) after taking all other variables into account.
+* Stage m, gender, and smoking history continue to insignificant 
+* However, both t3 and t4 are not statistically significant and their effect is diminished after taking all other variables into account.
+* Age becomes borderline significant 
+</div>
+
+## Conclusions
+<div class = "black">
+* We estimated the survival rates for LUSC and LUAD and found there is no statistically significant difference between their survival rates 
+* The one, three, and five year survival rates for LUSC and LUAD are 81.1% versus 85.5%, 55.7% versus 58.2%, and 43.6% versus 33.8%, respectively. 
+* In LUSC, both KM and Cox univariate models indicated that none of the variables have a statistically significant association with overall survival 
+* In LUAD, the overall cancer stage and spread to lymphnodes have a significant association with overall survival both in univariate and multivariate analysis
+* Based on results from multivariate analysis, age and cancer stage might have some possible interactions
+* As a follow up, it would be interesting to use cox models with interactions between age and overall cancer stage, smoking history and cancer stage, age and stage t.
+</div>
