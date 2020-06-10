@@ -4,4 +4,4 @@ In this project, I analyzed clinical trial data from the cancer genome atlas pro
 
 I used survival, survminer, RTCGA, RTCGA.clinical packages in R for this project. 
 
-The Rmd file was used to generate the html report.
+The Rmd file was used to generate the html report thats on my website 
